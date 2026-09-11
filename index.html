@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>LLM 通联监测</title>
+<style>
+:root { color-scheme: dark; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%; overflow: hidden; background: transparent;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; user-select: none;
+}
+#app {
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: rgba(13, 17, 28, 0.90);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 26px var(--glow);
+  color: #e6eaf2;
+  backdrop-filter: blur(18px);
+  --c: #60a5fa; --glow: rgba(96, 165, 250, 0.28);
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+#app.online   { --c: #34d399; --glow: rgba(52, 211, 153, 0.30);  border-color: rgba(52, 211, 153, 0.50); }
+#app.degraded { --c: #fbbf24; --glow: rgba(251, 191, 36, 0.30);  border-color: rgba(251, 191, 36, 0.50); }
+#app.offline  { --c: #f87171; --glow: rgba(248, 113, 113, 0.34); border-color: rgba(248, 113, 113, 0.55); }
+#app.checking { --c: #60a5fa; --glow: rgba(96, 165, 250, 0.30);  border-color: rgba(96, 165, 250, 0.45); }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  -webkit-app-region: drag; padding: 2px 4px;
+}
+header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
+.addr {
+  display: flex; align-items: center; gap: 5px; margin-top: 2px;
+  font-family: Consolas, monospace; font-size: 10.5px; color: #8b93a7;
+  -webkit-app-region: no-drag;
+}
+#addrText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#btnEdit {
+  border: none; background: none; color: #6b7386; cursor: pointer;
+  font-size: 11px; padding: 0 2px; line-height: 1;
+}
+#btnEdit:hover { color: #93c5fd; }
+#addrInput {
+  width: 100%; max-width: 230px;
+  font-family: Consolas, monospace; font-size: 10.5px;
+  background: rgba(255, 255, 255, 0.06); color: #e6eaf2;
+  border: 1px solid rgba(96, 165, 250, 0.5); border-radius: 6px;
+  padding: 2px 6px; outline: none;
+}
+.btns { display: flex; gap: 6px; -webkit-app-region: no-drag; }
+.btns button {
+  width: 26px; height: 24px; border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05); color: #aab2c5;
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+.btns button:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.btns button.active { background: rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.5); color: #34d399; }
+.btns button#btnClose:hover { background: rgba(248, 113, 113, 0.2); border-color: rgba(248, 113, 113, 0.55); color: #f87171; }
+
+.status {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+}
+.dot {
+  flex: 0 0 20px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--c); box-shadow: 0 0 14px var(--c);
+  animation: pulse 1.8s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.88); }
+}
+.st-text { font-size: 19px; font-weight: 700; letter-spacing: 1px; }
+.st-sub {
+  font-size: 11px; color: #98a1b5; margin-top: 3px;
+  max-width: 185px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lat-big { margin-left: auto; text-align: right; font-family: Consolas, monospace; }
+.lat-big b { font-size: 22px; font-weight: 700; color: var(--c); }
+.lat-big span { display: block; font-size: 10px; color: #7d8598; margin-top: 2px; }
+
+.zt {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  --zc: #60a5fa;
+}
+.zt.direct  { --zc: #34d399; border-color: rgba(52, 211, 153, 0.35); }
+.zt.relay   { --zc: #fbbf24; border-color: rgba(251, 191, 36, 0.35); }
+.zt.offline { --zc: #f87171; border-color: rgba(248, 113, 113, 0.45); }
+.zt-dot {
+  flex: 0 0 14px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--zc); box-shadow: 0 0 10px var(--zc);
+}
+.zt-title { font-size: 12.5px; font-weight: 600; }
+.zt-sub {
+  font-size: 10.5px; color: #98a1b5; margin-top: 2px;
+  max-width: 195px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.zt-lat { margin-left: auto; text-align: right; font-family: Consolas, monospace; }
+.zt-lat b { font-size: 16px; font-weight: 700; color: var(--zc); }
+.zt-lat span { display: block; font-size: 9.5px; color: #7d8598; margin-top: 1px; }
+
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.stat {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px; padding: 8px 2px; text-align: center;
+}
+.stat label {
+  display: block; margin-bottom: 4px;
+  font-size: 10px; color: #7d8598; white-space: nowrap;
+}
+.stat b { font-size: 14px; font-weight: 600; font-family: Consolas, monospace; color: #e6eaf2; }
+
+.chart {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px; padding: 6px;
+}
+.chart canvas { display: block; width: 100%; height: 58px; }
+
+.models { display: flex; flex-wrap: wrap; gap: 6px; }
+.mchip {
+  font-family: Consolas, monospace; font-size: 11px; padding: 3px 10px;
+  border-radius: 20px; background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.35); color: #93c5fd;
+}
+.model-empty { font-size: 10.5px; color: #6b7386; padding-left: 4px; }
+
+.log {
+  flex: 1; min-height: 88px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px; padding: 8px 10px;
+}
+.log-title { font-size: 10px; color: #7d8598; letter-spacing: 1px; margin-bottom: 6px; }
+#logList { list-style: none; }
+#logList li {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-family: Consolas, monospace; font-size: 11px;
+  padding: 2.5px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+}
+#logList li:last-child { border-bottom: none; }
+.lt { color: #6b7386; flex: 0 0 auto; }
+.lv { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv.ok { color: #34d399; }
+.lv.fail { color: #f87171; }
+
+#app.compact .stats, #app.compact .chart, #app.compact .models,
+#app.compact .log, #app.compact footer { display: none; }
+
+footer { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
+#btnLog {
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  background: rgba(96, 165, 250, 0.12); color: #93c5fd;
+  border-radius: 8px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  transition: all 0.15s;
+}
+#btnLog:hover { background: rgba(96, 165, 250, 0.25); }
+.foot-info { margin-left: auto; font-size: 10.5px; color: #6b7386; }
+</style>
+</head>
+<body>
+<div id="app" class="checking">
+  <header>
+    <div>
+      <h1>LLM 通联监测</h1>
+      <div class="addr">
+        <span id="addrText">192.168.100.190:8080/v1</span>
+        <input id="addrInput" type="text" placeholder="http://主机:端口/v1 或 主机:端口（IPv6 [地址]:端口）" style="display:none" title="回车保存 · Esc 取消" />
+        <button id="btnEdit" title="修改 API 地址（自动保存）">✎</button>
+      </div>
+    </div>
+    <div class="btns">
+      <button id="btnPin" class="active" title="窗口置顶">顶</button>
+      <button id="btnCollapse" title="收缩 / 展开视图">缩</button>
+      <button id="btnHide" title="隐藏到托盘">—</button>
+      <button id="btnClose" title="退出">✕</button>
+    </div>
+  </header>
+
+  <section class="status">
+    <div class="dot"></div>
+    <div>
+      <div class="st-text" id="stText">检测中</div>
+      <div class="st-sub" id="stSub">正在执行首次检测…</div>
+    </div>
+    <div class="lat-big"><b id="latBig">—</b><span>最近延迟</span></div>
+  </section>
+
+  <section class="zt" id="ztSec">
+    <div class="zt-dot"></div>
+    <div>
+      <div class="zt-title" id="ztTitle">ZeroTier 打洞</div>
+      <div class="zt-sub" id="ztSub">检测中…</div>
+    </div>
+    <div class="zt-lat"><b id="ztLat">—</b><span>4090 网段跳</span></div>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><label>成功率·20分</label><b id="stRate">—</b></div>
+    <div class="stat"><label>P95·10分</label><b id="stP95">—</b></div>
+    <div class="stat"><label>连续成功</label><b id="stStreak">—</b></div>
+    <div class="stat"><label>检测间隔</label><b>5s</b></div>
+  </section>
+
+  <section class="chart"><canvas id="spark"></canvas></section>
+
+  <section class="models" id="modelRow"><span class="model-empty">尚未获取到模型列表</span></section>
+
+  <section class="log">
+    <div class="log-title">最近事件</div>
+    <ul id="logList"></ul>
+  </section>
+
+  <footer>
+    <button id="btnLog" title="打开断连/异常日志">▤ 日志</button>
+    <span class="foot-info">API/TCP 5s / 打洞 15s 自动检测 · 断连/异常落盘 14 天（data\monitor-*.log）</span>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const APP = $('app');
+const LABEL = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中' };
+const ZTLABEL = {
+  direct: '打洞成功 · 直连',
+  relay: '打洞未建立 · 经中继',
+  offline: '网关对端离线',
+  checking: '打洞检测中…',
+  unknown: '打洞查询异常',
+};
+
+function classify(checks) {
+  if (!checks.length) return 'checking';
+  if (checks.slice(-3).every((c) => !c.ok)) return 'offline';
+  const fails = checks.slice(-10).filter((c) => !c.ok).length;
+  const last = checks[checks.length - 1];
+  if (!last.ok || fails > 2) return 'degraded';
+  return 'online';
+}
+function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms'; }
+function fmtTime(ts) { return new Date(ts).toTimeString().slice(0, 8); }
+function p95(arr) {
+  const s = [...arr].sort((a, b) => a - b);
+  if (!s.length) return null;
+  return s[Math.min(s.length - 1, Math.ceil(s.length * 0.95) - 1)];
+}
+function streakOf(checks) {
+  let s = 0;
+  for (let i = checks.length - 1; i >= 0 && checks[i].ok; i--) s++;
+  return s;
+}
+
+function drawSpark(checks) {
+  const cv = $('spark');
+  const W = cv.width, H = cv.height;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.fillRect(0, H - 1, W, 1);
+  const N = 120, bw = W / N;
+  const cs = checks.slice(-N);
+  for (let i = 0; i < N; i++) {
+    const c = cs[i];
+    if (!c) continue;
+    const x = W - (N - i) * bw;
+    let h, fill;
+    if (c.ok) {
+      const t = Math.min(1, Math.max(0, (Math.log10(Math.max(c.ms, 10)) - 1) / (Math.log10(30000) - 1)));
+      h = 4 + t * (H - 12);
+      fill = 'rgba(52,211,153,' + (0.3 + t * 0.7).toFixed(2) + ')';
+    } else {
+      h = H - 6;
+      fill = 'rgba(248,113,113,0.9)';
+    }
+    ctx.fillStyle = fill;
+    ctx.fillRect(x + 1, H - h, Math.max(1, bw - 2), h);
+  }
+}
+
+function renderZt(zt) {
+  const z = zt && zt.status ? zt : { status: 'checking', detail: '等待首次查询…', latency: null };
+  const sec = $('ztSec');
+  sec.className = 'zt ' + z.status;
+  $('ztTitle').textContent = ZTLABEL[z.status] || ZTLABEL.checking;
+  $('ztSub').textContent = z.detail || '';
+  $('ztSub').title = z.detail || '';
+  $('ztLat').textContent = z.latency ? fmtMs(z.latency) : '—';
+}
+
+function render(state) {
+  const checks = state.checks;
+  const st = classify(checks);
+  APP.classList.remove('online', 'degraded', 'offline', 'checking');
+  APP.classList.add(st);
+  const last = checks[checks.length - 1];
+  $('stText').textContent = LABEL[st];
+
+  let sub;
+  if (st === 'checking') sub = '正在执行首次检测…';
+  else if (st === 'online') sub = '最近 ' + streakOf(checks) + ' 次检测全部成功';
+  else if (st === 'degraded') sub = '近期存在失败 · ' + (last ? (last.err || 'HTTP ' + last.http) : '');
+  else sub = '连续连接失败 · ' + (last ? (last.err || 'HTTP ' + last.http) : '');
+  $('stSub').textContent = sub;
+  $('stSub').title = sub;
+
+  $('latBig').textContent = last && last.ok ? fmtMs(last.ms) : '—';
+
+  const total = checks.length;
+  const okc = checks.filter((c) => c.ok).length;
+  $('stRate').textContent = total ? (okc / total * 100).toFixed(1) + '%' : '—';
+  const p = p95(checks.filter((c) => c.ok).map((c) => c.ms));
+  $('stP95').textContent = p == null ? '—' : fmtMs(p);
+  const s = streakOf(checks);
+  $('stStreak').textContent = s > 200 ? '200+' : String(s);
+
+  const row = $('modelRow');
+  const isTcp = !/^https?:\/\//i.test(String(state.apiBase || ''));
+  if (isTcp) {
+    row.innerHTML = '<span class="model-empty">TCP 模式 · 无模型列表</span>';
+  } else if (state.models && state.models.length) {
+    row.innerHTML = '';
+    for (const m of state.models.slice(0, 6)) {
+      const sp = document.createElement('span');
+      sp.className = 'mchip';
+      sp.textContent = m;
+      row.appendChild(sp);
+    }
+  } else {
+    row.innerHTML = '<span class="model-empty">尚未获取到模型列表</span>';
+  }
+
+  const ul = $('logList');
+  ul.innerHTML = '';
+  const items = checks.slice(-6).reverse();
+  for (const c of items) {
+    const li = document.createElement('li');
+    const t = document.createElement('span');
+    t.className = 'lt';
+    t.textContent = fmtTime(c.ts);
+    const v = document.createElement('span');
+    v.className = 'lv ' + (c.ok ? 'ok' : 'fail');
+    v.textContent = c.ok
+      ? '✓ ' + fmtMs(c.ms)
+      : '✗ ' + (c.err || 'HTTP ' + c.http) + ' (' + fmtMs(c.ms) + ')';
+    li.append(t, v);
+    ul.appendChild(li);
+  }
+  renderZt(state.zt);
+  drawSpark(checks);
+}
+
+// ---- API 地址编辑：✎ 点开输入框，回车保存（自动写入 config.json），Esc 取消 ----
+const addrInput = $('addrInput');
+const addrText = $('addrText');
+function editingAddr() { return addrInput.style.display !== 'none'; }
+function showAddrInput() {
+  addrInput.value = addrText.textContent;
+  addrText.style.display = 'none';
+  addrInput.style.display = '';
+  addrInput.focus();
+  addrInput.select();
+}
+function hideAddrInput(save) {
+  if (!editingAddr()) return;
+  addrInput.style.display = 'none';
+  addrText.style.display = '';
+  if (!save) return;
+  const v = addrInput.value.trim().replace(/\/+$/, '');
+  if (!v) return;
+  const isUrl = /^https?:\/\/.+/i.test(v);
+  const isTcp = /^\[[^\]]+\]:\d{1,5}$/.test(v) || /^[^\s\]:]+:\d{1,5}$/.test(v);
+  if (!isUrl && !isTcp) { addrInput.title = '格式：http(s)://… 或 主机:端口（IPv6 用 [地址]:端口）'; showAddrInput(); return; }
+  window.api.setConfig(v);
+}
+$('btnEdit').onclick = () => { if (!editingAddr()) showAddrInput(); };
+addrInput.onkeydown = (e) => {
+  if (e.key === 'Enter') hideAddrInput(true);
+  else if (e.key === 'Escape') { addrInput.title = ''; hideAddrInput(false); }
+};
+addrInput.onblur = () => { if (editingAddr()) hideAddrInput(true); };
+
+window.api.onState((s) => {
+  if (s.apiBase && !editingAddr()) addrText.textContent = s.apiBase;
+  if (s.collapsed != null) {
+    APP.classList.toggle('compact', !!s.collapsed);
+    $('btnCollapse').classList.toggle('active', !!s.collapsed);
+  }
+  render(s);
+});
+$('btnPin').onclick = async () => {
+  const p = await window.api.togglePin();
+  $('btnPin').classList.toggle('active', p);
+};
+$('btnCollapse').onclick = () => window.api.toggleCollapse();
+$('btnHide').onclick = () => window.api.hide();
+$('btnClose').onclick = () => window.api.close();
+$('btnLog').onclick = () => window.api.openLogs();
+window.addEventListener('load', () => {
+  const cv = $('spark');
+  cv.width = cv.clientWidth;
+  cv.height = 58;
+});
+</script>
+</body>
+</html>

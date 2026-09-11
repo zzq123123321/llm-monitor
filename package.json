@@ -1,0 +1,32 @@
+{
+  "name": "llm-monitor",
+  "productName": "LLM-Monitor",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.xu.llm-monitor",
+    "productName": "LLM-Monitor",
+    "win": {
+      "target": "portable",
+      "artifactName": "LLM-Monitor-Portable.exe",
+      "icon": "build/icon.png"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "package.json"
+    ],
+    "asar": true,
+    "compression": "maximum"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}
