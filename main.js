@@ -204,7 +204,11 @@ function targetOf(api) {
     } catch (_) { return null; }
   }
   const m = api.match(/^\[([^\]]+)\]:(\d+)$/) || api.match(/^([^\s\]:]+):(\d+)$/);
-  return m ? { host: m[1], port: Number(m[2]), apiUrl: '', mode: 'tcp' } : null;
+  if (m) return { host: m[1], port: Number(m[2]), apiUrl: '', mode: 'tcp' };
+  // 只填主机/IP（无端口）：只做 L1 + 路由 + ICMP，不测端口
+  const h = api.match(/^\[([^\]]+)\]$/) || api.match(/^([A-Za-z0-9._-]+)$/);
+  if (h) return { host: h[1], port: 0, apiUrl: '', mode: 'icmp' };
+  return null;
 }
 
 async function checkOnce() {
@@ -221,12 +225,14 @@ async function checkOnce() {
     headers: API_KEY ? { Authorization: 'Bearer ' + API_KEY } : {},
   });
   const tcpOk = r.l2.tcp.ok;
-  const ok = t.mode === 'api' ? r.l3.ok : tcpOk;
+  const icmpOnly = t.mode === 'icmp';
+  const ok = t.mode === 'api' ? r.l3.ok : icmpOnly ? r.l2.icmp.ok : tcpOk;
   const auth = r.verdict === 'auth';
-  const ms = t.mode === 'api' ? (r.l3.ms || r.l2.tcp.ms) : r.l2.tcp.ms;
+  const ms = t.mode === 'api' ? (r.l3.ms || r.l2.tcp.ms) : icmpOnly ? (r.l2.icmp.rtt || 0) : r.l2.tcp.ms;
   let err = '';
   if (!ok) {
-    if (t.mode === 'api' && tcpOk) err = r.l3.err === 'HTTP_TIMEOUT' ? 'HTTP 无响应' : r.l3.err;
+    if (icmpOnly) err = 'ICMP 不通（仅测 IP 可达性）';
+    else if (t.mode === 'api' && tcpOk) err = r.l3.err === 'HTTP_TIMEOUT' ? 'HTTP 无响应' : r.l3.err;
     else err = TCP_ERR_CN[r.l2.tcp.err] || r.l2.tcp.err || '连接失败';
   }
   return {
@@ -310,7 +316,7 @@ async function pollLoop() {
 function layerText(L) {
   if (!L) return '（无分层数据）';
   const short = (s) => String(s || '').replace(/^(ICMP|TCP|HTTP)\s+/, '');
-  const tcp = L.tcp.ok ? L.tcp.ms + 'ms' : short(TCP_ERR_CN[L.tcp.err] || L.tcp.err || '失败');
+  const tcp = L.tcp.skipped ? '跳过' : L.tcp.ok ? L.tcp.ms + 'ms' : short(TCP_ERR_CN[L.tcp.err] || L.tcp.err || '失败');
   const icmp = L.icmp.ok ? (L.icmp.rtt != null ? L.icmp.rtt + 'ms' : '通') : short(L.icmp.err || '失败');
   const http = L.http.skipped ? '跳过' : (L.http.ok ? L.http.http + ' ' + L.http.ms + 'ms'
     : (L.http.http ? String(L.http.http) : (L.http.err === 'HTTP_TIMEOUT' ? '无响应' : short(L.http.err || '失败'))));
@@ -473,8 +479,9 @@ ipcMain.handle('set-config', async (_e, url) => {
   const u = String(url || '').trim().replace(/\/+$/, '');
   const isUrl = /^https?:\/\/.+/i.test(u);
   const isTcp = /^\[[^\]]+\]:\d+$/.test(u) || /^[^\s\]:]+:\d+$/.test(u);
-  if (!isUrl && !isTcp) return { ok: false, err: '格式：http(s)://主机:端口/v1 或 主机:端口（IPv6 用 [地址]:端口）' };
-  if (!isUrl) {
+  const isHost = /^\[[^\]]+\]$/.test(u) || /^[A-Za-z0-9._-]+$/.test(u);
+  if (!isUrl && !isTcp && !isHost) return { ok: false, err: '格式：http(s)://主机:端口/v1、主机:端口，或只填主机/IP（仅测可达性）' };
+  if (isTcp) {
     const port = Number(u.match(/:(\d+)$/)[1]);
     if (port < 1 || port > 65535) return { ok: false, err: '端口需在 1–65535 之间' };
   }

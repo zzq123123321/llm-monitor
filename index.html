@@ -347,8 +347,8 @@ function renderLayers(L) {
     L.zt.state === 'direct' ? 'ok' : L.zt.state === 'relay' ? '' : 'fail');
   add('路由 ' + (L.route.ok ? (L.route.nexthop || '有') : '无'), L.route.ok ? 'ok' : 'fail');
   add('ICMP ' + (L.icmp.ok ? (L.icmp.rtt != null ? L.icmp.rtt + 'ms' : '通') : '失败'), L.icmp.ok ? 'ok' : 'fail');
-  add('TCP ' + (L.tcp.ok ? L.tcp.ms + 'ms' : ({ TIMEOUT: '超时', ECONNREFUSED: '未监听', EHOSTUNREACH: '不可达', ENETUNREACH: '网不可达' }[L.tcp.err] || '失败')),
-    L.tcp.ok ? 'ok' : 'fail');
+  add('TCP ' + (L.tcp.skipped ? '跳过' : (L.tcp.ok ? L.tcp.ms + 'ms' : ({ TIMEOUT: '超时', ECONNREFUSED: '未监听', EHOSTUNREACH: '不可达', ENETUNREACH: '网不可达' }[L.tcp.err] || '失败'))),
+    L.tcp.skipped ? 'skip' : L.tcp.ok ? 'ok' : 'fail');
   add('HTTP ' + (L.http.skipped ? '跳过' : (L.http.ok ? L.http.http + ' ' + L.http.ms + 'ms' : (L.http.http ? String(L.http.http) : '无响应'))),
     L.http.skipped ? 'skip' : L.http.ok ? 'ok' : 'fail');
 }
@@ -383,7 +383,8 @@ function render(state) {
   const row = $('modelRow');
   const isTcp = !/^https?:\/\//i.test(String(state.apiBase || ''));
   if (isTcp) {
-    row.innerHTML = '<span class="model-empty">TCP 模式 · 无模型列表</span>';
+    const icmpOnly = !state.layers || !state.layers.tcp || state.layers.tcp.skipped;
+    row.innerHTML = '<span class="model-empty">' + (icmpOnly ? '仅测 IP 可达性 · 未测端口' : 'TCP 模式 · 无模型列表') + '</span>';
   } else if (state.models && state.models.length) {
     row.innerHTML = '';
     for (const m of state.models.slice(0, 6)) {
@@ -437,7 +438,8 @@ function hideAddrInput(save) {
   if (!v) return;
   const isUrl = /^https?:\/\/.+/i.test(v);
   const isTcp = /^\[[^\]]+\]:\d{1,5}$/.test(v) || /^[^\s\]:]+:\d{1,5}$/.test(v);
-  if (!isUrl && !isTcp) { addrInput.title = '格式：http(s)://… 或 主机:端口（IPv6 用 [地址]:端口）'; showAddrInput(); return; }
+  const isHost = /^\[[^\]]+\]$/.test(v) || /^[A-Za-z0-9._-]+$/.test(v);
+  if (!isUrl && !isTcp && !isHost) { addrInput.title = '格式：http(s)://… 、主机:端口，或只填主机/IP'; showAddrInput(); return; }
   window.api.setConfig(v);
 }
 $('btnEdit').onclick = () => { if (!editingAddr()) showAddrInput(); };

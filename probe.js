@@ -128,6 +128,12 @@ function verdictOf(r) {
 }
 
 function verdictOfL2(r) {
+  // 只填 IP（无端口）时，TCP 层没有意义，用 ICMP + 路由判主机是否可达
+  if (r.l2.tcp.skipped) {
+    if (r.l2.icmp.ok) return 'ok';
+    if (!r.l2.route.ok) return 'local-network';
+    return r.l1.state === 'peer-missing' ? 'zt-peer-down' : 'path-down';
+  }
   if (r.l2.tcp.err === 'ECONNREFUSED') return 'port-closed';
   const tcpTimeout = r.l2.tcp.err === 'TIMEOUT' || r.l2.tcp.err === 'ETIMEDOUT';
   if (r.l2.tcp.ok) return 'ok';
@@ -141,12 +147,20 @@ async function probeAll(opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
   const t0 = Date.now();
   const hostPort = o.hostPort;
-  const [l1, icmp, route] = await Promise.all([
+  const [l1, icmp0, route] = await Promise.all([
     probeZt(o),
     probeIcmp(hostPort.host, o.icmpTimeout),
     probeRoute(o.routePrefix),
   ]);
-  const tcp = await probeTcp(hostPort.host, hostPort.port, o.tcpTimeout);
+  // ICMP 常被目标限速（实测约 1/10 丢），失败时补测一次，避免把限速报成断线
+  let icmp = icmp0;
+  if (!icmp0.ok) {
+    const retry = await probeIcmp(hostPort.host, o.icmpTimeout);
+    if (retry.ok) { retry.retried = true; icmp = retry; }
+  }
+  const tcp = hostPort.port
+    ? await probeTcp(hostPort.host, hostPort.port, o.tcpTimeout)
+    : { skipped: true, ok: false, ms: 0, err: 'SKIPPED(未指定端口)' };
   const httpRes = !o.apiUrl
     ? { skipped: true, ok: true, http: 0, ms: 0, err: '', models: [] }
     : tcp.ok
