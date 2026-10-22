@@ -4,6 +4,7 @@ const fs = require('fs');
 const zlib = require('zlib');
 const { execFile } = require('child_process');
 const nodeNet = require('net');
+const probe = require('./probe');
 
 function dataRoot() {
   return app.isPackaged ? app.getPath('userData') : __dirname;
@@ -31,7 +32,11 @@ let API = process.env.LLM_API_BASE || 'http://192.168.100.190:8080/v1';
   if (c.apiBase) API = c.apiBase;
 }
 const POLL_MS = 5000;
-const CHECK_TIMEOUT = 5000;
+// 分层探测：每层独立超时，互不掩盖
+const ICMP_TIMEOUT = 1500;  // L2a ICMP
+const L2_TIMEOUT = 2000;    // L2b TCP 端口
+const L3_TIMEOUT = 5000;    // L3 HTTP
+const L1_TIMEOUT = 2000;    // L1 ZeroTier 查询
 const HISTORY_MAX = 240;
 
 // ZeroTier 打洞监测：4090 网段 192.168.100.0/24 经 ZT 成员 192.168.191.236 路由，
@@ -60,7 +65,10 @@ let lastModels = [];
 // ---------- 持久化日志：只记录断连/异常，中文可读 ----------
 // data/monitor-YYYYMMDD.log：每行 [YYYY-MM-DD HH:mm:ss] 事件描述
 const ST_CN = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中' };
-const ZT_CN = { direct: '直连', relay: '经中继', offline: '对端离线', checking: '检测中', unknown: '查询失败' };
+const ZT_CN = {
+  direct: '直连', relay: '经中继', offline: '对端离线', checking: '检测中', unknown: '查询失败',
+  'no-token': 'token 不可读', 'service-down': '服务未运行', 'query-timeout': '查询超时', 'query-error': '查询异常',
+};
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 function ymdOf(ts) {
@@ -163,75 +171,62 @@ function classify(checks) {
   return 'online';
 }
 
-// ---------- 单次连通性检测：GET /v1/models ----------
-function errMsg(e) {
-  if (e && e.name === 'AbortError') return '超时';
-  const code = (e && e.cause && e.cause.code) || '';
-  if (code === 'ECONNREFUSED') return '连接被拒绝 (ECONNREFUSED)';
-  if (code === 'ETIMEDOUT') return '连接超时 (ETIMEDOUT)';
-  if (code === 'ECONNRESET') return '连接被重置 (ECONNRESET)';
-  const m = (e && e.message) || '';
-  return m.replace('net::', '') || '连接失败';
-}
+// ---------- 单次连通性检测：分层探测（L1 ZeroTier / L2 路由+ICMP+TCP / L3 HTTP） ----------
 
-// ---------- 目标识别：http(s) URL → API 模式；host:port → TCP 模式 ----------
-function parseTarget() {
-  if (/^https?:\/\//i.test(API)) return { type: 'api' };
-  const m6 = API.match(/^\[([^\]]+)\]:(\d+)$/);
-  if (m6) return { type: 'tcp', host: m6[1], port: Number(m6[2]) };
-  const m = API.match(/^([^\s\]:]+):(\d+)$/);
-  if (m) return { type: 'tcp', host: m[1], port: Number(m[2]) };
-  return { type: 'invalid', err: '无法识别的地址：http(s)://… 或 主机:端口（IPv6 用 [地址]:端口）' };
-}
+const TCP_ERR_CN = {
+  TIMEOUT: 'TCP 超时', ETIMEDOUT: 'TCP 超时', ECONNREFUSED: '端口未监听',
+  EHOSTUNREACH: '主机不可达', ENETUNREACH: '网络不可达', ECONNRESET: '连接被重置',
+};
+const VERDICT_CN = {
+  ok: '正常',
+  auth: '服务在·鉴权失败',
+  'port-closed': '端口未监听',
+  'tcp-filtered': 'ICMP 通·TCP 被拦',
+  'local-network': '本机网络/路由异常',
+  'zt-peer-down': 'ZeroTier 对端离线',
+  'path-down': '路径不通',
+  'api-hang': '端口通·HTTP 无响应',
+  unknown: '原因不明',
+};
 
-// ---------- 单次 TCP 连接探测（IPv4/主机名/IPv6 均可） ----------
-function tcpCheck(host, port) {
-  return new Promise((resolve) => {
-    const t0 = Date.now();
-    let done = false;
-    let sock;
-    const timer = setTimeout(() => fin(false, '连接超时（' + CHECK_TIMEOUT + 'ms）'), CHECK_TIMEOUT);
-    function fin(ok, err) {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { if (sock) sock.destroy(); } catch (_) {}
-      resolve(ok
-        ? { ts: Date.now(), ms: Date.now() - t0, ok: true, http: 200, err: '', models: [], mode: 'tcp' }
-        : { ts: Date.now(), ms: Date.now() - t0, ok: false, http: 0, err: err || '连接失败', models: [], mode: 'tcp' });
-    }
-    try { sock = nodeNet.connect({ host, port }); } catch (e) { fin(false, e.message); return; }
-    sock.once('connect', () => fin(true));
-    sock.once('error', (e) => fin(false,
-      e.code === 'ECONNREFUSED' ? '连接被拒绝 (ECONNREFUSED)'
-        : e.code === 'ENETUNREACH' ? '网络不可达 (ENETUNREACH)'
-        : e.code === 'EHOSTUNREACH' ? '主机不可达 (EHOSTUNREACH)'
-        : (e.code || e.message || '连接失败')));
-  });
+function targetOf(api) {
+  if (/^https?:\/\//i.test(api)) {
+    try {
+      const u = new URL(api);
+      const host = u.hostname.replace(/^\[/, '').replace(/\]$/, '');
+      const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+      return { host, port, apiUrl: api, mode: 'api' };
+    } catch (_) { return null; }
+  }
+  const m = api.match(/^\[([^\]]+)\]:(\d+)$/) || api.match(/^([^\s\]:]+):(\d+)$/);
+  return m ? { host: m[1], port: Number(m[2]), apiUrl: '', mode: 'tcp' } : null;
 }
 
 async function checkOnce() {
-  const t = parseTarget();
-  if (t.type === 'tcp') return tcpCheck(t.host, t.port);
-  if (t.type === 'invalid') return { ts: Date.now(), ms: 0, ok: false, http: 0, err: t.err, models: [], mode: 'api' };
-  const t0 = Date.now();
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CHECK_TIMEOUT);
-  try {
-    const res = await net.fetch(API + '/models', { signal: ctrl.signal });
-    clearTimeout(timer);
-    const ms = Date.now() - t0;
-    if (!res.ok) return { ts: Date.now(), ms, ok: false, http: res.status, err: 'HTTP ' + res.status, models: [], mode: 'api' };
-    let models = [];
-    try {
-      const j = await res.json();
-      models = (j.data || []).map((m) => m.id);
-    } catch (_) { /* 模型列表解析失败不影响连通判定 */ }
-    return { ts: Date.now(), ms, ok: true, http: res.status, models, mode: 'api' };
-  } catch (e) {
-    clearTimeout(timer);
-    return { ts: Date.now(), ms: Date.now() - t0, ok: false, http: 0, err: errMsg(e), models: [], mode: 'api' };
+  const t = targetOf(API);
+  if (!t) return { ts: Date.now(), ms: 0, ok: false, http: 0, err: '无法识别的地址', models: [], mode: 'api', layers: null };
+  const r = await probe.probeAll({
+    apiUrl: t.apiUrl,
+    hostPort: { host: t.host, port: t.port },
+    icmpTimeout: ICMP_TIMEOUT,
+    tcpTimeout: L2_TIMEOUT,
+    httpTimeout: L3_TIMEOUT,
+    ztTimeout: L1_TIMEOUT,
+    routePrefix: '192.168.100.0',
+  });
+  const tcpOk = r.l2.tcp.ok;
+  const ok = t.mode === 'api' ? r.l3.ok : tcpOk;
+  const ms = t.mode === 'api' ? (r.l3.ms || r.l2.tcp.ms) : r.l2.tcp.ms;
+  let err = '';
+  if (!ok) {
+    if (t.mode === 'api' && tcpOk) err = r.l3.err === 'HTTP_TIMEOUT' ? 'HTTP 无响应' : r.l3.err;
+    else err = TCP_ERR_CN[r.l2.tcp.err] || r.l2.tcp.err || '连接失败';
   }
+  return {
+    ts: r.ts, ms: ms || 0, ok, http: r.l3.http || (tcpOk ? 200 : 0), err,
+    models: r.l3.models || [], mode: t.mode,
+    layers: { zt: r.l1, icmp: r.l2.icmp, route: r.l2.route, tcp: r.l2.tcp, http: r.l3, verdict: r.verdict },
+  };
 }
 
 function trimHistory() {
@@ -240,7 +235,12 @@ function trimHistory() {
 
 function pushState() {
   if (!win || win.isDestroyed()) return;
-  win.webContents.send('state', { checks: history.slice(), models: lastModels, zt: ztState, apiBase: API, collapsed });
+  const last = history.length ? history[history.length - 1] : null;
+  win.webContents.send('state', {
+    checks: history.slice(), models: lastModels, zt: ztState, apiBase: API, collapsed,
+    layers: last ? last.layers : null,
+    verdict: last && last.layers ? last.layers.verdict : '',
+  });
 }
 
 function updateTrayStatus() {
@@ -275,8 +275,18 @@ async function pollLoop() {
     if (r.ok && r.models.length) lastModels = r.models;
     pushState();
     updateTrayStatus();
+    const L = r.layers;
+    syncZt(L);
     if (!r.ok) {
-      appendLog((r.mode === 'tcp' ? 'TCP 断连' : 'API 断连') + '：' + (r.err || 'HTTP ' + r.http) + '（耗时 ' + r.ms + 'ms）｜打洞：' + ztDesc(), r.ts);
+      const now = Date.now();
+      const v = L ? L.verdict : 'unknown';
+      if (v !== lastFailVerdict || now - lastFailLogAt > 60000) {
+        appendLog('失败：' + (r.err || 'HTTP ' + r.http) + '（' + r.ms + 'ms）｜' + layerText(L), r.ts);
+        lastFailVerdict = v;
+        lastFailLogAt = now;
+      }
+    } else {
+      lastFailVerdict = '';
     }
     const st = classify(history);
     if (prevSt && st !== prevSt) {
@@ -288,51 +298,45 @@ async function pollLoop() {
   }
 }
 
-// ---------- ZeroTier 打洞状态 ----------
-let ztState = { status: 'checking', latency: null, path: '', detail: '' };
-
-function checkZt() {
-  return new Promise((resolve) => {
-    if (process.platform !== 'win32') { resolve({ status: 'unknown', detail: '仅支持 Windows' }); return; }
-    execFile(ZT_EXE, ['-q', '-j', 'listpeers'], { timeout: 8000, windowsHide: true }, (err, out) => {
-      if (err) {
-        const code = (err.code && String(err.code)) || '';
-        const detail = /ENOENT/.test(code) ? 'ZeroTier 未安装' : /timeout/i.test(err.message || '') ? '查询超时' : (err.message || '查询失败');
-        resolve({ status: 'unknown', detail, latency: null, path: '' });
-        return;
-      }
-      try {
-        const peers = JSON.parse(out);
-        const p = peers.find((x) => x.address === ZT_PEER);
-        if (!p) { resolve({ status: 'offline', detail: '网关对端不在线', latency: null, path: '' }); return; }
-        const act = (p.paths || []).filter((pt) => pt.active);
-        const lat = p.latency > 0 ? p.latency : null;
-        if (!p.tunneled && act.length) {
-          resolve({ status: 'direct', latency: lat, path: act[0].address, detail: 'P2P 直连 ' + act[0].address });
-        } else {
-          resolve({ status: 'relay', latency: lat, path: 'relay', detail: p.tunneled ? 'TCP 隧道中继' : 'UDP 中继（打洞未建立）' });
-        }
-      } catch (e) {
-        resolve({ status: 'unknown', detail: '解析失败 ' + e.message, latency: null, path: '' });
-      }
-    });
-  });
+function layerText(L) {
+  if (!L) return '（无分层数据）';
+  const short = (s) => String(s || '').replace(/^(ICMP|TCP|HTTP)\s+/, '');
+  const tcp = L.tcp.ok ? L.tcp.ms + 'ms' : short(TCP_ERR_CN[L.tcp.err] || L.tcp.err || '失败');
+  const icmp = L.icmp.ok ? (L.icmp.rtt != null ? L.icmp.rtt + 'ms' : '通') : short(L.icmp.err || '失败');
+  const http = L.http.skipped ? '跳过' : (L.http.ok ? L.http.http + ' ' + L.http.ms + 'ms'
+    : (L.http.http ? String(L.http.http) : (L.http.err === 'HTTP_TIMEOUT' ? '无响应' : short(L.http.err || '失败'))));
+  return '判定=' + (VERDICT_CN[L.verdict] || L.verdict)
+    + '｜L1 ' + (L.zt.state || '?') + (L.zt.latency ? ' ' + L.zt.latency + 'ms' : '')
+    + '｜路由 ' + (L.route.ok ? L.route.nexthop : '无')
+    + '｜ICMP ' + icmp
+    + '｜TCP ' + tcp
+    + '｜HTTP ' + http;
 }
 
-async function ztLoop() {
-  let first = true;
-  while (!isQuiting) {
-    const t0 = Date.now();
-    const prev = ztState.status;
-    ztState = await checkZt();
-    if (first) { dbg('first zt check: ' + JSON.stringify(ztState)); first = false; }
-    if (ztState.status !== prev) {
-      appendLog('打洞状态变化：' + (ZT_CN[prev] || prev) + ' → ' + (ZT_CN[ztState.status] || ztState.status) + (ztState.detail ? '（' + ztState.detail + '）' : ''));
-      dbg('zt state change ' + prev + ' -> ' + ztState.status + ' ' + ztState.detail);
-    }
-    pushState();
-    updateTrayStatus();
-    await new Promise((res) => setTimeout(res, Math.max(500, ZT_POLL_MS - (Date.now() - t0))));
+let lastFailLogAt = 0;
+let lastFailVerdict = '';
+let ztState = { status: 'checking', latency: null, path: '', detail: '' };
+
+const ZT_MAP = {
+  direct: 'direct', relay: 'relay', 'peer-missing': 'offline',
+  'no-token': 'no-token', 'service-down': 'service-down',
+  'query-timeout': 'query-timeout', 'query-error': 'query-error',
+};
+
+function syncZt(L) {
+  if (!L || !L.zt) return;
+  const z = L.zt;
+  const prev = ztState.status;
+  ztState = {
+    status: ZT_MAP[z.state] || 'unknown',
+    latency: z.latency || null,
+    path: z.path || '',
+    detail: z.detail || '',
+  };
+  if (ztState.status !== prev) {
+    appendLog('打洞状态变化：' + (ZT_CN[prev] || prev) + ' → ' + (ZT_CN[ztState.status] || ztState.status)
+      + (ztState.detail ? '（' + ztState.detail + '）' : ''));
+    dbg('zt state change ' + prev + ' -> ' + ztState.status + ' ' + ztState.detail);
   }
 }
 
@@ -501,7 +505,6 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     createTray();
     pollLoop();
-    ztLoop();
     globalShortcut.register('CommandOrControl+Shift+M', () => {
       if (!win || win.isDestroyed()) return;
       win.show();

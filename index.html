@@ -87,6 +87,18 @@ header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
 .lat-big b { font-size: 22px; font-weight: 700; color: var(--c); }
 .lat-big span { display: block; font-size: 10px; color: #7d8598; margin-top: 2px; }
 
+.layers { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.chip {
+  font-size: 9.5px; padding: 2px 6px; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #98a1b5; font-family: Consolas, monospace; white-space: nowrap;
+}
+.chip.ok { color: #34d399; border-color: rgba(52, 211, 153, 0.35); }
+.chip.fail { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
+.chip.skip { opacity: 0.5; }
+.chip.verdict { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
+.chip.verdict.ok { color: #34d399; border-color: rgba(52, 211, 153, 0.35); }
+
 .zt {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 12px;
@@ -98,6 +110,9 @@ header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
 .zt.direct  { --zc: #34d399; border-color: rgba(52, 211, 153, 0.35); }
 .zt.relay   { --zc: #fbbf24; border-color: rgba(251, 191, 36, 0.35); }
 .zt.offline { --zc: #f87171; border-color: rgba(248, 113, 113, 0.45); }
+.zt.no-token, .zt.service-down, .zt.query-timeout, .zt.query-error {
+  --zc: #f87171; border-color: rgba(248, 113, 113, 0.35);
+}
 .zt-dot {
   flex: 0 0 14px; width: 14px; height: 14px; border-radius: 50%;
   background: var(--zc); box-shadow: 0 0 10px var(--zc);
@@ -195,6 +210,7 @@ footer { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
     <div>
       <div class="st-text" id="stText">检测中</div>
       <div class="st-sub" id="stSub">正在执行首次检测…</div>
+      <div class="layers" id="layers"></div>
     </div>
     <div class="lat-big"><b id="latBig">—</b><span>最近延迟</span></div>
   </section>
@@ -240,6 +256,16 @@ const ZTLABEL = {
   offline: '网关对端离线',
   checking: '打洞检测中…',
   unknown: '打洞查询异常',
+  'no-token': 'ZeroTier 查询缺权限',
+  'service-down': 'ZeroTier 服务未运行',
+  'query-timeout': 'ZeroTier 查询超时',
+  'query-error': 'ZeroTier 查询异常',
+};
+const VERDICT = {
+  ok: '正常', auth: '服务在·鉴权失败', 'port-closed': '端口未监听',
+  'tcp-filtered': 'ICMP 通·TCP 被拦', 'local-network': '本机网络/路由异常',
+  'zt-peer-down': 'ZeroTier 对端离线', 'path-down': '路径不通',
+  'api-hang': '端口通·HTTP 无响应', unknown: '原因不明',
 };
 
 function classify(checks) {
@@ -298,6 +324,27 @@ function renderZt(zt) {
   $('ztSub').textContent = z.detail || '';
   $('ztSub').title = z.detail || '';
   $('ztLat').textContent = z.latency ? fmtMs(z.latency) : '—';
+}
+
+function renderLayers(L) {
+  const box = $('layers');
+  box.innerHTML = '';
+  if (!L) return;
+  const add = (text, cls) => {
+    const s = document.createElement('span');
+    s.className = 'chip' + (cls ? ' ' + cls : '');
+    s.textContent = text;
+    box.appendChild(s);
+  };
+  add(VERDICT[L.verdict] || L.verdict, 'verdict' + (L.verdict === 'ok' ? ' ok' : ''));
+  add('ZT ' + ({ direct: '直连', relay: '中继', 'peer-missing': '对端离线', 'no-token': '缺权限', 'service-down': '服务停', 'query-timeout': '超时', 'query-error': '异常' }[L.zt.state] || L.zt.state),
+    L.zt.state === 'direct' ? 'ok' : L.zt.state === 'relay' ? '' : 'fail');
+  add('路由 ' + (L.route.ok ? (L.route.nexthop || '有') : '无'), L.route.ok ? 'ok' : 'fail');
+  add('ICMP ' + (L.icmp.ok ? (L.icmp.rtt != null ? L.icmp.rtt + 'ms' : '通') : '失败'), L.icmp.ok ? 'ok' : 'fail');
+  add('TCP ' + (L.tcp.ok ? L.tcp.ms + 'ms' : ({ TIMEOUT: '超时', ECONNREFUSED: '未监听', EHOSTUNREACH: '不可达', ENETUNREACH: '网不可达' }[L.tcp.err] || '失败')),
+    L.tcp.ok ? 'ok' : 'fail');
+  add('HTTP ' + (L.http.skipped ? '跳过' : (L.http.ok ? L.http.http + ' ' + L.http.ms + 'ms' : (L.http.http ? String(L.http.http) : '无响应'))),
+    L.http.skipped ? 'skip' : L.http.ok ? 'ok' : 'fail');
 }
 
 function render(state) {
@@ -359,6 +406,7 @@ function render(state) {
     ul.appendChild(li);
   }
   renderZt(state.zt);
+  renderLayers(state.layers);
   drawSpark(checks);
 }
 
