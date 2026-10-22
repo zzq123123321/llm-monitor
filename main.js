@@ -20,16 +20,18 @@ function loadConfig() {
   } catch (_) {}
   return {};
 }
-function saveConfig(apiBase) {
+function saveConfig(patch) {
   try {
-    fs.writeFileSync(getConfigFile(), JSON.stringify(Object.assign(loadConfig(), { apiBase }), null, 2));
+    fs.writeFileSync(getConfigFile(), JSON.stringify(Object.assign(loadConfig(), patch), null, 2));
   } catch (e) { dbg('saveConfig: ' + e.message); }
 }
 // 优先级：config.json（界面里保存的） > 环境变量 LLM_API_BASE > 默认
 let API = process.env.LLM_API_BASE || 'http://192.168.100.190:8080/v1';
+let API_KEY = process.env.LLM_API_KEY || '';
 {
   const c = loadConfig();
   if (c.apiBase) API = c.apiBase;
+  if (c.apiKey) API_KEY = c.apiKey;
 }
 const POLL_MS = 5000;
 // 分层探测：每层独立超时，互不掩盖
@@ -64,7 +66,7 @@ let lastModels = [];
 
 // ---------- 持久化日志：只记录断连/异常，中文可读 ----------
 // data/monitor-YYYYMMDD.log：每行 [YYYY-MM-DD HH:mm:ss] 事件描述
-const ST_CN = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中' };
+const ST_CN = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中', auth: '在线·未授权' };
 const ZT_CN = {
   direct: '直连', relay: '经中继', offline: '对端离线', checking: '检测中', unknown: '查询失败',
   'no-token': 'token 不可读', 'service-down': '服务未运行', 'query-timeout': '查询超时', 'query-error': '查询异常',
@@ -156,6 +158,7 @@ const DOT_COLORS = {
   degraded: [251, 191, 36],
   offline: [248, 113, 113],
   checking: [96, 165, 250],
+  auth: [251, 191, 36],
 };
 
 function dotImage(status) {
@@ -164,6 +167,8 @@ function dotImage(status) {
 
 function classify(checks) {
   if (!checks.length) return 'checking';
+  const last0 = checks[checks.length - 1];
+  if (last0 && last0.auth) return 'auth';
   if (checks.slice(-3).every((c) => !c.ok)) return 'offline';
   const fails = checks.slice(-10).filter((c) => !c.ok).length;
   const last = checks[checks.length - 1];
@@ -213,9 +218,11 @@ async function checkOnce() {
     httpTimeout: L3_TIMEOUT,
     ztTimeout: L1_TIMEOUT,
     routePrefix: '192.168.100.0',
+    headers: API_KEY ? { Authorization: 'Bearer ' + API_KEY } : {},
   });
   const tcpOk = r.l2.tcp.ok;
   const ok = t.mode === 'api' ? r.l3.ok : tcpOk;
+  const auth = r.verdict === 'auth';
   const ms = t.mode === 'api' ? (r.l3.ms || r.l2.tcp.ms) : r.l2.tcp.ms;
   let err = '';
   if (!ok) {
@@ -223,7 +230,7 @@ async function checkOnce() {
     else err = TCP_ERR_CN[r.l2.tcp.err] || r.l2.tcp.err || '连接失败';
   }
   return {
-    ts: r.ts, ms: ms || 0, ok, http: r.l3.http || (tcpOk ? 200 : 0), err,
+    ts: r.ts, ms: ms || 0, ok, auth, http: r.l3.http || (tcpOk ? 200 : 0), err,
     models: r.l3.models || [], mode: t.mode,
     layers: { zt: r.l1, icmp: r.l2.icmp, route: r.l2.route, tcp: r.l2.tcp, http: r.l3, verdict: r.verdict },
   };
@@ -238,6 +245,7 @@ function pushState() {
   const last = history.length ? history[history.length - 1] : null;
   win.webContents.send('state', {
     checks: history.slice(), models: lastModels, zt: ztState, apiBase: API, collapsed,
+    hasKey: !!API_KEY,
     layers: last ? last.layers : null,
     verdict: last && last.layers ? last.layers.verdict : '',
   });
@@ -258,6 +266,7 @@ function updateTrayStatus() {
     degraded: 'LLM Monitor · 异常（近期存在失败）',
     offline: 'LLM Monitor · 离线',
     checking: 'LLM Monitor · 检测中',
+    auth: 'LLM Monitor · 在线但未授权',
   }[st]) + ' | ' + ztTip;
   tray.setImage(dotImage(st));
   tray.setToolTip(tip);
@@ -471,7 +480,7 @@ ipcMain.handle('set-config', async (_e, url) => {
   }
   const prev = API;
   API = u;
-  saveConfig(u);
+  saveConfig({ apiBase: u });
   appendLog('监测目标：' + prev + ' → ' + u);
   dbg('api base changed: ' + prev + ' -> ' + u);
   // 新地址立即复测一次，界面马上反馈
@@ -483,6 +492,23 @@ ipcMain.handle('set-config', async (_e, url) => {
   updateTrayStatus();
   if (!r.ok) appendLog('新目标首测失败：' + (r.err || 'HTTP ' + r.http) + '（' + u + '）', r.ts);
   return { ok: true, apiBase: API };
+});
+
+// 保存 API Key（写进 config.json，界面不显示明文）
+ipcMain.handle('set-key', async (_e, key) => {
+  const k = String(key || '').trim();
+  API_KEY = k;
+  saveConfig({ apiKey: k });
+  appendLog('API Key ' + (k ? '已更新（' + k.length + ' 字符）' : '已清除'));
+  dbg('api key updated, len=' + k.length);
+  const r = await checkOnce();
+  history.push(r);
+  trimHistory();
+  if (r.ok && r.models.length) lastModels = r.models;
+  pushState();
+  updateTrayStatus();
+  appendLog('更新 Key 后首测：' + (r.ok ? '通过 HTTP ' + r.http : (r.err || 'HTTP ' + r.http)), r.ts);
+  return { ok: true, hasKey: !!API_KEY, testOk: r.ok, http: r.http };
 });
 
 // 打开日志：优先打开今天的记录文件；没有则打开日志目录

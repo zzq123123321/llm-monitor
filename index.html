@@ -27,6 +27,7 @@ html, body {
 #app.degraded { --c: #fbbf24; --glow: rgba(251, 191, 36, 0.30);  border-color: rgba(251, 191, 36, 0.50); }
 #app.offline  { --c: #f87171; --glow: rgba(248, 113, 113, 0.34); border-color: rgba(248, 113, 113, 0.55); }
 #app.checking { --c: #60a5fa; --glow: rgba(96, 165, 250, 0.30);  border-color: rgba(96, 165, 250, 0.45); }
+#app.auth     { --c: #fbbf24; --glow: rgba(251, 191, 36, 0.30);  border-color: rgba(251, 191, 36, 0.50); }
 
 header {
   display: flex; align-items: center; justify-content: space-between;
@@ -39,11 +40,12 @@ header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; }
   -webkit-app-region: no-drag;
 }
 #addrText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#btnEdit {
+#btnEdit, #btnKey {
   border: none; background: none; color: #6b7386; cursor: pointer;
   font-size: 11px; padding: 0 2px; line-height: 1;
 }
-#btnEdit:hover { color: #93c5fd; }
+#btnEdit:hover, #btnKey:hover { color: #93c5fd; }
+#btnKey.active { color: #34d399; }
 #addrInput {
   width: 100%; max-width: 230px;
   font-family: Consolas, monospace; font-size: 10.5px;
@@ -194,7 +196,9 @@ footer { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
       <div class="addr">
         <span id="addrText">192.168.100.190:8080/v1</span>
         <input id="addrInput" type="text" placeholder="http://主机:端口/v1 或 主机:端口（IPv6 [地址]:端口）" style="display:none" title="回车保存 · Esc 取消" />
+        <input id="keyInput" type="password" placeholder="API Key（Bearer，留空=清除）" style="display:none" title="回车保存 · Esc 取消" />
         <button id="btnEdit" title="修改 API 地址（自动保存）">✎</button>
+        <button id="btnKey" title="设置 API Key（Bearer）">🔑</button>
       </div>
     </div>
     <div class="btns">
@@ -249,7 +253,7 @@ footer { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
 <script>
 const $ = (id) => document.getElementById(id);
 const APP = $('app');
-const LABEL = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中' };
+const LABEL = { online: '在线', degraded: '异常', offline: '离线', checking: '检测中', auth: '在线·未授权' };
 const ZTLABEL = {
   direct: '打洞成功 · 直连',
   relay: '打洞未建立 · 经中继',
@@ -270,6 +274,8 @@ const VERDICT = {
 
 function classify(checks) {
   if (!checks.length) return 'checking';
+  const last0 = checks[checks.length - 1];
+  if (last0 && last0.auth) return 'auth';
   if (checks.slice(-3).every((c) => !c.ok)) return 'offline';
   const fails = checks.slice(-10).filter((c) => !c.ok).length;
   const last = checks[checks.length - 1];
@@ -350,7 +356,7 @@ function renderLayers(L) {
 function render(state) {
   const checks = state.checks;
   const st = classify(checks);
-  APP.classList.remove('online', 'degraded', 'offline', 'checking');
+  APP.classList.remove('online', 'degraded', 'offline', 'checking', 'auth');
   APP.classList.add(st);
   const last = checks[checks.length - 1];
   $('stText').textContent = LABEL[st];
@@ -358,6 +364,7 @@ function render(state) {
   let sub;
   if (st === 'checking') sub = '正在执行首次检测…';
   else if (st === 'online') sub = '最近 ' + streakOf(checks) + ' 次检测全部成功';
+  else if (st === 'auth') sub = '服务可达，但凭证无效（HTTP ' + (last ? last.http : '401') + '）· 点 🔑 填 Key';
   else if (st === 'degraded') sub = '近期存在失败 · ' + (last ? (last.err || 'HTTP ' + last.http) : '');
   else sub = '连续连接失败 · ' + (last ? (last.err || 'HTTP ' + last.http) : '');
   $('stSub').textContent = sub;
@@ -440,8 +447,36 @@ addrInput.onkeydown = (e) => {
 };
 addrInput.onblur = () => { if (editingAddr()) hideAddrInput(true); };
 
+// ---- API Key 编辑：🔑 点开输入，回车保存（写入 config.json 的 apiKey），Esc 取消 ----
+const keyInput = $('keyInput');
+function editingKey() { return keyInput.style.display !== 'none'; }
+function showKeyInput() {
+  keyInput.value = '';
+  addrText.style.display = 'none';
+  keyInput.style.display = '';
+  keyInput.focus();
+}
+function hideKeyInput(save) {
+  if (!editingKey()) return;
+  keyInput.style.display = 'none';
+  addrText.style.display = '';
+  if (!save) return;
+  window.api.setKey(keyInput.value.trim());
+}
+$('btnKey').onclick = () => {
+  if (editingKey()) { hideKeyInput(false); return; }
+  if (editingAddr()) hideAddrInput(false);
+  showKeyInput();
+};
+keyInput.onkeydown = (e) => {
+  if (e.key === 'Enter') hideKeyInput(true);
+  else if (e.key === 'Escape') hideKeyInput(false);
+};
+keyInput.onblur = () => { if (editingKey()) hideKeyInput(true); };
+
 window.api.onState((s) => {
   if (s.apiBase && !editingAddr()) addrText.textContent = s.apiBase;
+  $('btnKey').classList.toggle('active', !!s.hasKey);
   if (s.collapsed != null) {
     APP.classList.toggle('compact', !!s.collapsed);
     $('btnCollapse').classList.toggle('active', !!s.collapsed);

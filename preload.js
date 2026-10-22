@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('api', {
   openLogs: () => ipcRenderer.send('open-logs'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   setConfig: (url) => ipcRenderer.invoke('set-config', url),
+  setKey: (key) => ipcRenderer.invoke('set-key', key),
 });
