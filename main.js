@@ -28,10 +28,17 @@ function saveConfig(patch) {
 // 优先级：config.json（界面里保存的） > 环境变量 LLM_API_BASE > 默认
 let API = process.env.LLM_API_BASE || 'http://192.168.100.190:8080/v1';
 let API_KEY = process.env.LLM_API_KEY || '';
+// 分层探测的独立目标（走隧道时 HTTP 是回环，ICMP/TCP 仍指向真实链路）
+let PROBE_ICMP = process.env.LLM_PROBE_ICMP || '';
+let PROBE_TCP = process.env.LLM_PROBE_TCP || '';
+let PROBE_TCP_PORT = Number(process.env.LLM_PROBE_TCP_PORT || 0);
 {
   const c = loadConfig();
   if (c.apiBase) API = c.apiBase;
   if (c.apiKey) API_KEY = c.apiKey;
+  if (c.probeIcmpHost) PROBE_ICMP = String(c.probeIcmpHost);
+  if (c.probeTcpHost) PROBE_TCP = String(c.probeTcpHost);
+  if (c.probeTcpPort) PROBE_TCP_PORT = Number(c.probeTcpPort);
 }
 const POLL_MS = 5000;
 // 分层探测：每层独立超时，互不掩盖
@@ -217,11 +224,14 @@ async function checkOnce() {
   const r = await probe.probeAll({
     apiUrl: t.apiUrl,
     hostPort: { host: t.host, port: t.port },
+    icmpHost: PROBE_ICMP || t.host,
+    tcpHost: PROBE_TCP || t.host,
+    tcpPort: PROBE_TCP_PORT || t.port,
     icmpTimeout: ICMP_TIMEOUT,
     tcpTimeout: L2_TIMEOUT,
     httpTimeout: L3_TIMEOUT,
     ztTimeout: L1_TIMEOUT,
-    routePrefix: '192.168.100.0',
+    routePrefix: PROBE_ICMP || '192.168.100.0',
     headers: API_KEY ? { Authorization: 'Bearer ' + API_KEY } : {},
   });
   const tcpOk = r.l2.tcp.ok;

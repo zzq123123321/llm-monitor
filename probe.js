@@ -63,7 +63,12 @@ function probeTcp(host, port, timeout) {
 async function probeRoute(prefix) {
   const { err, out } = await sh('route', ['print', '-4'], 4000);
   if (err) return { ok: false, err: 'route 查询失败' };
-  const rows = out.split(/\r?\n/).filter((l) => l.includes(prefix));
+  // route print 只列网段；传入完整 IP 时按所在 /24 网段匹配
+  const parts = String(prefix || '').split('.');
+  const net = parts.length === 4 && parts[3] !== '0'
+    ? parts.slice(0, 3).join('.') + '.0'
+    : prefix;
+  const rows = out.split(/\r?\n/).filter((l) => l.includes(net));
   const row = rows.find((l) => /^\s*\d+\.\d+\.\d+\.\d+\s/.test(l));
   if (!row) return { ok: false, err: '无 ' + prefix + ' 路由' };
   const f = row.trim().split(/\s+/);
@@ -146,20 +151,24 @@ function verdictOfL2(r) {
 async function probeAll(opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
   const t0 = Date.now();
-  const hostPort = o.hostPort;
+  const hostPort = o.hostPort || {};
+  // 分层探测目标可各自指定：走隧道时 HTTP 是回环，但 ICMP/TCP 仍要看真实链路
+  const icmpHost = o.icmpHost || hostPort.host;
+  const tcpHost = o.tcpHost || hostPort.host;
+  const tcpPort = o.tcpPort != null ? o.tcpPort : hostPort.port;
   const [l1, icmp0, route] = await Promise.all([
     probeZt(o),
-    probeIcmp(hostPort.host, o.icmpTimeout),
+    probeIcmp(icmpHost, o.icmpTimeout),
     probeRoute(o.routePrefix),
   ]);
   // ICMP 常被目标限速（实测约 1/10 丢），失败时补测一次，避免把限速报成断线
   let icmp = icmp0;
   if (!icmp0.ok) {
-    const retry = await probeIcmp(hostPort.host, o.icmpTimeout);
+    const retry = await probeIcmp(icmpHost, o.icmpTimeout);
     if (retry.ok) { retry.retried = true; icmp = retry; }
   }
-  const tcp = hostPort.port
-    ? await probeTcp(hostPort.host, hostPort.port, o.tcpTimeout)
+  const tcp = tcpPort
+    ? await probeTcp(tcpHost, tcpPort, o.tcpTimeout)
     : { skipped: true, ok: false, ms: 0, err: 'SKIPPED(未指定端口)' };
   const httpRes = !o.apiUrl
     ? { skipped: true, ok: true, http: 0, ms: 0, err: '', models: [] }
